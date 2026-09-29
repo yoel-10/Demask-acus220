@@ -9,10 +9,10 @@
 Desarrollar un plugin DSP de asistencia de mezcla enfocado en detectar y corregir automáticamente el enmascaramiento frecuencial entre pistas de bombo (Kick) y bajo (Bass).
 
 ## Pregunta principal
-¿Es posible automatizar la detección de conflictos de fase y frecuencia en el rango de subgraves mediante análisis FFT para aplicar un ducking dinámico quirúrgico sin afectar la integridad del arreglo musical?
+¿¿Es posible desarrollar un "sidechain inteligente" mediante análisis FFT que detecte y mitigue el enmascaramiento frecuencial entre el kick y el bajo, logrando una mezcla más limpia y definida sin el bombeo antinatural de los compresores tradicionales?
 
 ## Motivación
-El choque de graves es uno de los problemas más críticos en géneros como el Mambo Urbano, Reggaetón y Trap. El objetivo es crear una solución técnica que reemplace el sidechain estático tradicional, permitiendo que el bajo mantenga su peso y presencia mientras se abre espacio dinámico para el transitorio del bombo.
+El enmascaramiento frecuencial entre el kick y el bajo es uno de los mayores desafíos para lograr una mezcla clara y profesional. El sidechain clásico suele ser una solución demasiado estática que muchas veces altera la dinámica natural de los instrumentos. Mi motivación con DeMask es crear una herramienta basada en procesamiento digital de señales (DSP) que analice este choque de frecuencias en tiempo real y aplique una reducción quirúrgica. El objetivo es automatizar la separación frecuencial para garantizar un low-end transparente y definido, sin los artefactos de bombeo de la compresión tradicional.
 
 ## Datos
 - Fuente: Archivos WAV crudos (stems de sesiones de mezcla).
