@@ -3,230 +3,276 @@ import numpy as np
 import soundfile as sf
 import sounddevice as sd
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
+from pyqtgraph.Qt import QtCore, QtWidgets
 from scipy.fft import rfft, rfftfreq
 from scipy.ndimage import gaussian_filter1d
 
-pg.setConfigOptions(antialias=True)
+# 1. CARGA DE ARCHIVOS Y PARÁMETROS BÁSICOS
+archivo_kick = "data/raw/kick.wav"
+archivo_bajo = "data/raw/Bajo.wav"
+CHUNK = 4096  # Tamaño del buffer de audio
 
-# --- 1. CONFIGURACIÓN Y AUDIO BASE ---
-FILE_1 = "data/raw/kick.wav"  
-FILE_2 = "data/raw/Bajo.wav"  
-CHUNK = 4096  
-
-def load_audio_files(f1, f2):
-    global data1, data2, fs, min_len
+def cargar_audios(path_kick, path_bajo):
     try:
-        d1, sample_rate = sf.read(f1, dtype='float32')
-        d2, _ = sf.read(f2, dtype='float32')
-        if d1.ndim > 1: d1 = d1[:, 0]
-        if d2.ndim > 1: d2 = d2[:, 0]
-        mlen = min(len(d1), len(d2))
-        return d1[:mlen], d2[:mlen], sample_rate, mlen
-    except Exception as e:
-        return np.zeros(4096), np.zeros(4096), 44100, 4096
+        data_k, fs = sf.read(path_kick, dtype='float32')
+        data_b, _ = sf.read(path_bajo, dtype='float32')
 
-data1, data2, fs, min_len = load_audio_files(FILE_1, FILE_2)
-current_frame = 0
-total_time_sec = min_len / fs if fs else 0
+        # Convertir a mono si vienen en estéreo
+        if data_k.ndim > 1:
+            data_k = data_k[:, 0]
+        if data_b.ndim > 1:
+            data_b = data_b[:, 0]
 
-raw_fft_1 = np.full(CHUNK // 2 + 1, -100.0)
-raw_fft_2 = np.full(CHUNK // 2 + 1, -100.0)
-freqs = rfftfreq(CHUNK, 1/fs)
-freqs[0] = 1 
-target_freqs = np.logspace(np.log10(20), np.log10(20000), 500) 
-log_target_freqs = np.log10(target_freqs)
-display_fft_1 = np.full(500, -100.0)
-display_fft_2 = np.full(500, -100.0)
+        # Ajustar ambos al mismo largo
+        largo_min = min(len(data_k), len(data_b))
+        data_k = data_k[:largo_min]
+        data_b = data_b[:largo_min]
 
-current_rms_db = -100.0
-current_peak_db = -100.0
-kick_gain_db = 0.0 
-bass_gain_db = 0.0 
+        return data_k, data_b, fs, largo_min
+    except Exception as error:
+        print(f"Error al leer archivos: {error}")
+        return np.zeros(CHUNK), np.zeros(CHUNK), 44100, CHUNK
 
-def format_time(seconds):
-    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
+audio_kick, audio_bajo, fs, total_muestras = cargar_audios(archivo_kick, archivo_bajo)
 
-# --- 2. HILO DE AUDIO ---
-def audio_callback(outdata, frames, time, status):
-    global current_frame, raw_fft_1, raw_fft_2, current_rms_db, current_peak_db
-    if current_frame + frames > min_len:
-        outdata[:] = 0; raise sd.CallbackStop 
-        
-    chunk1 = data1[current_frame : current_frame + frames].copy()
-    chunk2 = data2[current_frame : current_frame + frames].copy()
+# Variables de control de reproducción y niveles
+indice_reproduccion = 0
+ganancia_kick_db = 0.0
+ganancia_bajo_db = 0.0
+rms_actual = -100.0
+peak_actual = -100.0
 
-    if kick_gain_db <= -99.0: chunk1 *= 0.0
-    else: chunk1 *= (10 ** (kick_gain_db / 20.0))
+# Preparación para cálculo de FFT y escala logarítmica
+num_bins = CHUNK // 2 + 1
+fft_kick_raw = np.full(num_bins, -100.0)
+fft_bajo_raw = np.full(num_bins, -100.0)
 
-    if bass_gain_db <= -99.0: chunk2 *= 0.0
-    else: chunk2 *= (10 ** (bass_gain_db / 20.0))
-        
-    mixed = (chunk1 + chunk2) * 0.5
-    outdata[:, 0] = mixed; outdata[:, 1] = mixed
-    
-    current_peak_db = 20 * np.log10(np.max(np.abs(mixed)) + 1e-10)
-    current_rms_db = 20 * np.log10(np.sqrt(np.mean(mixed**2)) + 1e-10)
-    
-    window = np.hanning(frames)
-    raw_fft_1 = 20 * np.log10(np.clip((np.abs(rfft(chunk1 * window)) / (CHUNK / 2)) * 2.0, 1e-10, 1.0))
-    raw_fft_2 = 20 * np.log10(np.clip((np.abs(rfft(chunk2 * window)) / (CHUNK / 2)) * 2.0, 1e-10, 1.0))
-    current_frame += frames
+frecuencias = rfftfreq(CHUNK, 1.0 / fs)
+frecuencias[0] = 1.0  # Evita log(0)
 
-stream = sd.OutputStream(samplerate=fs, channels=2, blocksize=CHUNK, callback=audio_callback)
+puntos_grafico = 500
+eje_frecuencias_log = np.logspace(np.log10(20), np.log10(20000), puntos_grafico)
+eje_x_grafico = np.log10(eje_frecuencias_log)
 
-# --- 3. INTERFAZ TIPO DEMO ---
+curva_kick_suave = np.full(puntos_grafico, -100.0)
+curva_bajo_suave = np.full(puntos_grafico, -100.0)
+
+# 2. PROCESAMIENTO DE AUDIO EN TIEMPO REAL
+def procesar_audio(outdata, frames, time_info, status):
+    global indice_reproduccion, fft_kick_raw, fft_bajo_raw, rms_actual, peak_actual
+
+    # Comprobar si se terminó el audio
+    if indice_reproduccion + frames > total_muestras:
+        outdata.fill(0)
+        raise sd.CallbackStop
+
+    # Extraer el bloque actual
+    bloque_k = audio_kick[indice_reproduccion : indice_reproduccion + frames].copy()
+    bloque_b = audio_bajo[indice_reproduccion : indice_reproduccion + frames].copy()
+
+    # Aplicar volumen (dB a factor lineal)
+    if ganancia_kick_db <= -99.0:
+        factor_k = 0.0
+    else:
+        factor_k = 10 ** (ganancia_kick_db / 20.0)
+
+    if ganancia_bajo_db <= -99.0:
+        factor_b = 0.0
+    else:
+        factor_b = 10 ** (ganancia_bajo_db / 20.0)
+
+    bloque_k = bloque_k * factor_k
+    bloque_b = bloque_b * factor_b
+
+    # Mezcla estéreo básica (señal mono centrada)
+    mezcla = (bloque_k + bloque_b) * 0.5
+    outdata[:, 0] = mezcla
+    outdata[:, 1] = mezcla
+
+    # Telemetría de niveles
+    peak_actual = 20 * np.log10(np.max(np.abs(mezcla)) + 1e-10)
+    rms_actual = 20 * np.log10(np.sqrt(np.mean(mezcla**2)) + 1e-10)
+
+    # Cálculo de FFT con ventana Hanning
+    ventana = np.hanning(frames)
+    fft_k = np.abs(rfft(bloque_k * ventana)) / (CHUNK / 2) * 2.0
+    fft_b = np.abs(rfft(bloque_b * ventana)) / (CHUNK / 2) * 2.0
+
+    fft_kick_raw = 20 * np.log10(np.clip(fft_k, 1e-10, 1.0))
+    fft_bajo_raw = 20 * np.log10(np.clip(fft_b, 1e-10, 1.0))
+
+    indice_reproduccion += frames
+
+stream = sd.OutputStream(samplerate=fs, channels=2, blocksize=CHUNK, callback=procesar_audio)
+
+# 3. INTERFAZ GRÁFICA (PyQt + pyqtgraph)
 app = QtWidgets.QApplication(sys.argv)
-app.setStyleSheet("""
-    QWidget { background-color: #0d0f14; color: #9ca3af; font-family: 'Consolas', 'Courier New', monospace; }
-    QPushButton { background: #1f2430; border: 1px solid #374151; border-radius: 3px; padding: 6px 14px; font-weight: bold; color: #e5e7eb; }
-    QPushButton:hover { background: #374151; border: 1px solid #60a5fa; }
-    QGroupBox { border: 1px solid #374151; border-radius: 5px; margin-top: 10px; font-weight: bold; color: #60a5fa; }
-    QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }
-    QLabel { background: transparent; color: #d1d5db; }
-""")
+ventana = QtWidgets.QWidget()
+ventana.setWindowTitle("Proyecto DeMask - Análisis Kick y Bajo")
+ventana.resize(1000, 680)
 
-main_window = QtWidgets.QWidget()
-main_window.setWindowTitle("DeMask")
-main_window.resize(1100, 750)
-main_layout = QtWidgets.QVBoxLayout(main_window)
-main_layout.setContentsMargins(15, 15, 15, 15)
+layout_principal = QtWidgets.QVBoxLayout(ventana)
 
-# BARRA SUPERIOR CON SOLO EL NOMBRE
-top_panel = QtWidgets.QHBoxLayout()
-lbl_title = QtWidgets.QLabel("📈 DeMask")
-lbl_title.setStyleSheet("color: #60a5fa; font-weight: bold; font-size: 16px;")
-top_panel.addWidget(lbl_title)
-top_panel.addStretch()
+# Título y estado
+layout_encabezado = QtWidgets.QHBoxLayout()
+lbl_titulo = QtWidgets.QLabel("DeMask - Analizador de Espectro")
+lbl_titulo.setStyleSheet("font-size: 15px; font-weight: bold;")
+lbl_estado = QtWidgets.QLabel("Estado: Detenido")
 
-lbl_status = QtWidgets.QLabel("ESTADO: EN ESPERA")
-lbl_status.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px; background: #1f2430; padding: 3px 8px; border-radius: 3px;")
-top_panel.addWidget(lbl_status)
-main_layout.addLayout(top_panel)
+layout_encabezado.addWidget(lbl_titulo)
+layout_encabezado.addStretch()
+layout_encabezado.addWidget(lbl_estado)
+layout_principal.addLayout(layout_encabezado)
 
-# GRÁFICO ESPECTRAL
-analyzer_layout = QtWidgets.QHBoxLayout()
-graph_frame = QtWidgets.QFrame()
-graph_frame.setStyleSheet("background-color: #08090c; border: 1px solid #1f2430; border-radius: 4px;")
-graph_vbox = QtWidgets.QVBoxLayout(graph_frame)
-graph_vbox.setContentsMargins(0,0,0,0)
+# Gráfica espectral y panel lateral
+layout_medio = QtWidgets.QHBoxLayout()
 
 plot_widget = pg.PlotWidget()
-plot_widget.setBackground('transparent') 
-plot_widget.showGrid(x=True, y=True, alpha=0.15) 
-plot_widget.setMouseEnabled(x=False, y=False) 
+plot_widget.showGrid(x=True, y=True, alpha=0.3)
+plot_widget.setMouseEnabled(x=False, y=False)
 plot_widget.setXRange(np.log10(20), np.log10(20000), padding=0)
-plot_widget.setYRange(-90, 0, padding=0) 
+plot_widget.setYRange(-90, 0, padding=0)
 
-plot_widget.hideAxis('left'); plot_widget.showAxis('right') 
-y_axis = plot_widget.getAxis('right'); y_axis.setPen('#374151'); y_axis.setTextPen('#6b7280')
-y_axis.setTicks([[ (v, f"{v}") for v in [0, -10, -20, -30, -40, -50, -60, -70, -80, -90] ]])
+# Ejes de la gráfica
+eje_x = plot_widget.getAxis('bottom')
+eje_x.setLabel("Frecuencia (Hz)")
+ticks_frec = [(np.log10(f), str(f)) for f in [50, 100, 200, 500, 1000, 2000, 5000, 10000]]
+eje_x.setTicks([ticks_frec])
 
-bottom_axis = plot_widget.getAxis('bottom'); bottom_axis.setPen('#374151'); bottom_axis.setTextPen('#6b7280')
-bottom_axis.setTicks([[(np.log10(hz), f"{hz}Hz" if hz < 1000 else f"{hz//1000}kHz") for hz in [50, 100, 200, 500, 1000, 2000, 5000, 10000]]])
+eje_y = plot_widget.getAxis('left')
+eje_y.setLabel("Magnitud (dB)")
 
-curve1 = plot_widget.plot(pen=pg.mkPen('#06b6d4', width=1.5), fillLevel=-90, brush=pg.mkBrush(6, 182, 212, 20)) 
-curve2 = plot_widget.plot(pen=pg.mkPen('#ec4899', width=1.5), fillLevel=-90, brush=pg.mkBrush(236, 72, 153, 20)) 
+linea_kick = plot_widget.plot(pen=pg.mkPen('c', width=2), name="Kick")
+linea_bajo = plot_widget.plot(pen=pg.mkPen('m', width=2), name="Bajo")
+layout_medio.addWidget(plot_widget, stretch=4)
 
-graph_vbox.addWidget(plot_widget)
-analyzer_layout.addWidget(graph_frame, stretch=4)
+# Panel de telemetría (métricas DSP)
+grupo_telemetria = QtWidgets.QGroupBox("Datos DSP")
+layout_telemetria = QtWidgets.QVBoxLayout(grupo_telemetria)
 
-# PANEL DE TELEMETRÍA LATERAL
-telemetry_group = QtWidgets.QGroupBox("TELEMETRÍA DSP")
-telemetry_layout = QtWidgets.QVBoxLayout(telemetry_group)
-telemetry_layout.setSpacing(10)
+lbl_sr = QtWidgets.QLabel(f"Fs: {fs} Hz")
+lbl_chunk = QtWidgets.QLabel(f"Buffer: {CHUNK} muestras")
+lbl_resolucion = QtWidgets.QLabel(f"Resolución: {fs / CHUNK:.2f} Hz")
+lbl_rms = QtWidgets.QLabel("RMS: -100.0 dB")
+lbl_peak = QtWidgets.QLabel("Peak: -100.0 dB")
 
-lbl_sr = QtWidgets.QLabel(f"Sample Rate: {fs} Hz")
-lbl_chunk = QtWidgets.QLabel(f"Buffer Size: {CHUNK} samples")
-lbl_fft_res = QtWidgets.QLabel(f"Resolución FFT: {fs/CHUNK:.2f} Hz/bin")
-lbl_rms_val = QtWidgets.QLabel("RMS Master: -100.0 dB")
-lbl_peak_val = QtWidgets.QLabel("Peak Master: -100.0 dB")
+for lbl in [lbl_sr, lbl_chunk, lbl_resolucion, lbl_rms, lbl_peak]:
+    layout_telemetria.addWidget(lbl)
+layout_telemetria.addStretch()
 
-for lbl in [lbl_sr, lbl_chunk, lbl_fft_res, lbl_rms_val, lbl_peak_val]:
-    lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
-    telemetry_layout.addWidget(lbl)
+layout_medio.addWidget(grupo_telemetria, stretch=1)
+layout_principal.addLayout(layout_medio)
 
-telemetry_layout.addStretch()
-analyzer_layout.addWidget(telemetry_group, stretch=1)
-main_layout.addLayout(analyzer_layout)
+# Panel inferior con controles
+grupo_controles = QtWidgets.QGroupBox("Controles de Reproducción y Mezcla")
+layout_controles = QtWidgets.QHBoxLayout(grupo_controles)
 
-# CONTROLES INFERIORES
-controls_group = QtWidgets.QGroupBox("BANCO DE PRUEBAS Y GANANCIAS")
-controls_layout = QtWidgets.QHBoxLayout(controls_group)
+btn_reproducir = QtWidgets.QPushButton("Reproducir")
+btn_pausar = QtWidgets.QPushButton("Pausar")
+btn_reiniciar = QtWidgets.QPushButton("Reiniciar")
 
-btn_play = QtWidgets.QPushButton("▶ INICIAR STREAM AUDIO")
-btn_pause = QtWidgets.QPushButton("⏸ PAUSAR")
-btn_restart = QtWidgets.QPushButton("⏮ REINICIAR")
+layout_controles.addWidget(btn_reproducir)
+layout_controles.addWidget(btn_pausar)
+layout_controles.addWidget(btn_reiniciar)
 
-def start_stream():
+# Slider Ganancia Kick
+lbl_slider_k = QtWidgets.QLabel("Kick: 0.0 dB")
+slider_k = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+slider_k.setRange(0, 100)
+slider_k.setValue(50)
+
+def cambio_slider_kick(valor):
+    global ganancia_kick_db
+    if valor == 0:
+        ganancia_kick_db = -100.0
+    else:
+        ganancia_kick_db = (valor / 100.0) * 24.0 - 12.0
+    lbl_slider_k.setText(f"Kick: {ganancia_kick_db:+.1f} dB")
+
+slider_k.valueChanged.connect(cambio_slider_kick)
+
+layout_slider_k = QtWidgets.QVBoxLayout()
+layout_slider_k.addWidget(lbl_slider_k)
+layout_slider_k.addWidget(slider_k)
+layout_controles.addLayout(layout_slider_k)
+
+# Slider Ganancia Bajo
+lbl_slider_b = QtWidgets.QLabel("Bajo: 0.0 dB")
+slider_b = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+slider_b.setRange(0, 100)
+slider_b.setValue(50)
+
+def cambio_slider_bajo(valor):
+    global ganancia_bajo_db
+    if valor == 0:
+        ganancia_bajo_db = -100.0
+    else:
+        ganancia_bajo_db = (valor / 100.0) * 24.0 - 12.0
+    lbl_slider_b.setText(f"Bajo: {ganancia_bajo_db:+.1f} dB")
+
+slider_b.valueChanged.connect(cambio_slider_bajo)
+
+layout_slider_b = QtWidgets.QVBoxLayout()
+layout_slider_b.addWidget(lbl_slider_b)
+layout_slider_b.addWidget(slider_b)
+layout_controles.addLayout(layout_slider_b)
+
+layout_principal.addWidget(grupo_controles)
+
+# Funciones de botones
+def accion_reproducir():
     stream.start()
-    lbl_status.setText("ESTADO: PROCESANDO STREAM")
-    lbl_status.setStyleSheet("color: #10b981; font-weight: bold; font-size: 11px; background: #1f2430; padding: 3px 8px; border-radius: 3px;")
+    lbl_estado.setText("Estado: Reproduciendo")
 
-def pause_stream():
+def accion_pausar():
     stream.stop()
-    lbl_status.setText("ESTADO: PAUSADO")
-    lbl_status.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 11px; background: #1f2430; padding: 3px 8px; border-radius: 3px;")
+    lbl_estado.setText("Estado: Pausado")
 
-def restart_stream():
-    global current_frame
-    current_frame = 0
-    if not stream.active: stream.start()
-    lbl_status.setText("ESTADO: REINICIADO")
-    lbl_status.setStyleSheet("color: #10b981; font-weight: bold; font-size: 11px; background: #1f2430; padding: 3px 8px; border-radius: 3px;")
+def accion_reiniciar():
+    global indice_reproduccion
+    indice_reproduccion = 0
+    if not stream.active:
+        stream.start()
+    lbl_estado.setText("Estado: Reiniciado")
 
-btn_play.clicked.connect(start_stream)
-btn_pause.clicked.connect(pause_stream)
-btn_restart.clicked.connect(restart_stream)
+btn_reproducir.clicked.connect(accion_reproducir)
+btn_pausar.clicked.connect(accion_pausar)
+btn_reiniciar.clicked.connect(accion_reiniciar)
 
-controls_layout.addWidget(btn_play)
-controls_layout.addWidget(btn_pause)
-controls_layout.addWidget(btn_restart)
-controls_layout.addSpacing(30)
+# 4. TEMPORIZADOR DE ACTUALIZACIÓN VISUAL
+def actualizar_grafico():
+    global curva_kick_suave, curva_bajo_suave
 
-slider_kick_layout = QtWidgets.QVBoxLayout()
-lbl_k_text = QtWidgets.QLabel("Ganancia Kick: 0.0 dB")
-slider_kick = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-slider_kick.setRange(0, 100); slider_kick.setValue(50)
-def update_kick_slider(val):
-    global kick_gain_db
-    kick_gain_db = (val / 100.0) * 24.0 - 12.0 if val > 0 else -100.0
-    lbl_k_text.setText(f"Ganancia Kick: {kick_gain_db:+.1f} dB")
-slider_kick.valueChanged.connect(update_kick_slider)
-slider_kick_layout.addWidget(lbl_k_text); slider_kick_layout.addWidget(slider_kick)
-controls_layout.addLayout(slider_kick_layout)
-
-slider_bass_layout = QtWidgets.QVBoxLayout()
-lbl_b_text = QtWidgets.QLabel("Ganancia Bass: 0.0 dB")
-slider_bass = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-slider_bass.setRange(0, 100); slider_bass.setValue(50)
-def update_bass_slider(val):
-    global bass_gain_db
-    bass_gain_db = (val / 100.0) * 24.0 - 12.0 if val > 0 else -100.0
-    lbl_b_text.setText(f"Ganancia Bass: {bass_gain_db:+.1f} dB")
-slider_bass.valueChanged.connect(update_bass_slider)
-slider_bass_layout.addWidget(lbl_b_text); slider_bass_layout.addWidget(slider_bass)
-controls_layout.addLayout(slider_bass_layout)
-
-main_layout.addWidget(controls_group)
-
-# --- 4. BUCLE DE ACTUALIZACIÓN ---
-def update_gui():
-    global display_fft_1, display_fft_2
     if stream.active:
-        s1 = gaussian_filter1d(np.interp(target_freqs, freqs, raw_fft_1), sigma=1.5)
-        s2 = gaussian_filter1d(np.interp(target_freqs, freqs, raw_fft_2), sigma=4.0) 
-        display_fft_1 = np.where(s1 > display_fft_1, s1 * 0.85 + display_fft_1 * 0.15, s1 * 0.10 + display_fft_1 * 0.90)
-        display_fft_2 = np.where(s2 > display_fft_2, s2 * 0.85 + display_fft_2 * 0.15, s2 * 0.10 + display_fft_2 * 0.90)
-        curve1.setData(log_target_freqs, display_fft_1)
-        curve2.setData(log_target_freqs, display_fft_2)
-        
-        lbl_rms_val.setText(f"RMS Master: {current_rms_db:.1f} dB")
-        lbl_peak_val.setText(f"Peak Master: {current_peak_db:.1f} dB")
+        # Interpolación a escala logarítmica y filtro gaussiano
+        k_interp = np.interp(eje_frecuencias_log, frecuencias, fft_kick_raw)
+        b_interp = np.interp(eje_frecuencias_log, frecuencias, fft_bajo_raw)
+
+        s_kick = gaussian_filter1d(k_interp, sigma=1.5)
+        s_bajo = gaussian_filter1d(b_interp, sigma=4.0)
+
+        # Suavizado temporal (ataque y decaimiento)
+        curva_kick_suave = np.where(
+            s_kick > curva_kick_suave,
+            s_kick * 0.85 + curva_kick_suave * 0.15,
+            s_kick * 0.10 + curva_kick_suave * 0.90
+        )
+        curva_bajo_suave = np.where(
+            s_bajo > curva_bajo_suave,
+            s_bajo * 0.85 + curva_bajo_suave * 0.15,
+            s_bajo * 0.10 + curva_bajo_suave * 0.90
+        )
+
+        linea_kick.setData(eje_x_grafico, curva_kick_suave)
+        linea_bajo.setData(eje_x_grafico, curva_bajo_suave)
+
+        lbl_rms.setText(f"RMS: {rms_actual:.1f} dB")
+        lbl_peak.setText(f"Peak: {peak_actual:.1f} dB")
 
 timer = QtCore.QTimer()
-timer.timeout.connect(update_gui)
-timer.start(30) 
+timer.timeout.connect(actualizar_grafico)
+timer.start(30)  # ~33 FPS
 
-main_window.show()
+# 5. EJECUCIÓN DE LA APLICACIÓN
+ventana.show()
 sys.exit(app.exec())
