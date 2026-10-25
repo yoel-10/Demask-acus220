@@ -1,4 +1,4 @@
-# -- AVANCE DSP Y GUI (Fase de Pruebas) --
+# -- AVANCE DSP Y GUI (Parche 1: DSP Corregido, UI pendiente) --
 import sys
 import os
 import numpy as np
@@ -197,8 +197,9 @@ def audio_callback(outdata, frames, time, status):
         reduction_db = np.minimum(max_cut_db, over_db * 0.65 * sc_intensity)
         subtract_amount = 1.0 - (10.0 ** (-reduction_db / 20.0))
         
-        chunk2_processed = chunk2 + (bass_conflict_band * subtract_amount)
-        conflict_monitored = bass_conflict_band * (1.0 + subtract_amount)
+        # FIX APLICADO HOY: Resta correcta para ecualización dinámica (antes sumaba)
+        chunk2_processed = chunk2 - (bass_conflict_band * subtract_amount)
+        conflict_monitored = bass_conflict_band * (1.0 - subtract_amount)
     else:
         chunk2_processed = chunk2
         conflict_monitored = bass_conflict_band
@@ -355,6 +356,7 @@ slider_sc = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
 slider_sc.setRange(0, 100); slider_sc.setValue(70)
 def update_sc_slider(val):
     global sc_intensity
+    # BUG UI AÚN ACTIVO: Falta dividir por 100.0
     sc_intensity = val 
     lbl_sc_text.setText(f"SC AMT: {val}%")
 slider_sc.valueChanged.connect(update_sc_slider)
@@ -397,6 +399,7 @@ def update_gui():
 
 timer = QtCore.QTimer()
 timer.timeout.connect(update_gui)
+# BUG UI AÚN ACTIVO: Lag visual (300ms)
 timer.start(300) 
 
 main_window.show()
