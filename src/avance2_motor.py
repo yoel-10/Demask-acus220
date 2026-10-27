@@ -13,7 +13,7 @@ import scipy.signal as signal
 pg.setConfigOptions(antialias=True)
 
 FILE_1 = "data/raw/kick.wav"  
-FILE_2 = "data/raw/Bajo.wav"  
+FILE_2 = "data/raw/Bass.wav"  
 CHUNK = 4096  
 
 def load_audio_files(f1, f2):
