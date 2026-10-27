@@ -1,4 +1,4 @@
-# -- AVANCE DSP Y GUI (Parche 1: DSP Corregido, UI pendiente) --
+# -- VERSIÓN FINAL: Bugs de Slider y Lag de GUI solucionados --
 import sys
 import os
 import numpy as np
@@ -197,7 +197,6 @@ def audio_callback(outdata, frames, time, status):
         reduction_db = np.minimum(max_cut_db, over_db * 0.65 * sc_intensity)
         subtract_amount = 1.0 - (10.0 ** (-reduction_db / 20.0))
         
-        # FIX APLICADO HOY: Resta correcta para ecualización dinámica (antes sumaba)
         chunk2_processed = chunk2 - (bass_conflict_band * subtract_amount)
         conflict_monitored = bass_conflict_band * (1.0 - subtract_amount)
     else:
@@ -356,8 +355,8 @@ slider_sc = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
 slider_sc.setRange(0, 100); slider_sc.setValue(70)
 def update_sc_slider(val):
     global sc_intensity
-    # BUG UI AÚN ACTIVO: Falta dividir por 100.0
-    sc_intensity = val 
+    # FIX: Dividir por 100.0 para que el valor sea decimal (0.0 a 1.0)
+    sc_intensity = val / 100.0
     lbl_sc_text.setText(f"SC AMT: {val}%")
 slider_sc.valueChanged.connect(update_sc_slider)
 slider_sc_layout.addWidget(slider_sc); slider_sc_layout.addWidget(lbl_sc_text)
@@ -399,8 +398,8 @@ def update_gui():
 
 timer = QtCore.QTimer()
 timer.timeout.connect(update_gui)
-# BUG UI AÚN ACTIVO: Lag visual (300ms)
-timer.start(300) 
+# FIX: Refresco óptimo a 30ms (fluidez total)
+timer.start(30) 
 
 main_window.show()
 sys.exit(app.exec())
